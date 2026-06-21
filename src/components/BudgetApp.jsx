@@ -23,7 +23,7 @@ import {
   recurringIncomeApi, loanPaymentsApi,
   debtsOwedToMeApi, debtsIOweApi,
   balanceConfigApi, priorSavingsV2Api,
-  dangerZoneApi,
+  dangerZoneApi, profileApi,
 } from "../lib/supabase";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -53,18 +53,30 @@ const PALETTE = {
   iOwe:     "#f43f5e",
 };
 
+// صيغة الأرقام المفضّلة للمستخدم: "western" = 123, "arabic" = ١٢٣
+// تُحدَّث من داخل BudgetApp عند تحميل تفضيل المستخدم أو تغييره، وتُقرأ مباشرة هنا
+// لأن fmt/fmtPct تُستدعى أثناء كل render فتعكس القيمة الحالية تلقائياً
+let _numberLocale = "en-US";
+export const setNumberLocale = (format) => {
+  _numberLocale = format === "arabic" ? "ar-SA-u-nu-arab" : "en-US";
+};
+
 const fmt = (n, currency = "SAR") =>
-  new Intl.NumberFormat("ar-SA", { style:"currency", currency, minimumFractionDigits:2 })
+  new Intl.NumberFormat(_numberLocale, { style:"currency", currency, minimumFractionDigits:2 })
     .format(n ?? 0);
 
-const fmtPct = (n) => `${((n ?? 0) * 100).toFixed(1)}%`;
+const fmtPct = (n) =>
+  new Intl.NumberFormat(_numberLocale, { style:"percent", minimumFractionDigits:1, maximumFractionDigits:1 })
+    .format(n ?? 0);
+
+const fmtNum = (n) => new Intl.NumberFormat(_numberLocale).format(n ?? 0);
 
 const daysUntil = (dateStr) => {
   if (!dateStr) return null;
   const diff = Math.round((new Date(dateStr) - new Date()) / 86400000);
-  if (diff < 0) return `منتهي منذ ${Math.abs(diff)} يوم`;
+  if (diff < 0) return `منتهي منذ ${fmtNum(Math.abs(diff))} يوم`;
   if (diff === 0) return "اليوم";
-  return `${diff} يوم`;
+  return `${fmtNum(diff)} يوم`;
 };
 
 const addMonths = (dateStr, n) => {
@@ -494,6 +506,7 @@ export default function BudgetApp() {
   const userId = user?.id;
 
   const [dark, setDark] = useState(false);
+  const [numberFormat, setNumberFormatState] = useState("western");
   const [nav, setNav] = useState("dashboard");
   const [sideOpen, setSideOpen] = useState(false);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
@@ -517,6 +530,29 @@ export default function BudgetApp() {
   const showToast = (msg, type="success") => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
+  };
+
+  // ── تحميل تفضيلات المستخدم (الوضع الليلي وصيغة الأرقام) من الحساب عند الدخول ──
+  useEffect(() => {
+    if (!profile) return;
+    setDark(!!profile.dark_mode);
+    const savedFormat = profile.number_format || "western";
+    setNumberFormatState(savedFormat);
+    setNumberLocale(savedFormat);
+  }, [profile]);
+
+  const toggleDark = async () => {
+    const newVal = !dark;
+    setDark(newVal);
+    try { await profileApi.update(userId, { dark_mode: newVal }); }
+    catch (err) { console.error(err); }
+  };
+
+  const changeNumberFormat = async (fmt) => {
+    setNumberFormatState(fmt);
+    setNumberLocale(fmt);
+    try { await profileApi.update(userId, { number_format: fmt }); }
+    catch (err) { console.error(err); }
   };
 
   // ── INITIAL LOAD ──
@@ -767,12 +803,14 @@ export default function BudgetApp() {
 
   if (dataLoading) {
     return (
-      <div dir="rtl" className="min-h-screen bg-gray-50 dark:bg-gray-950 flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center animate-pulse">
-            <Wallet size={24} className="text-white" />
+      <div className={dark ? "dark" : ""} dir="rtl">
+        <div className="min-h-screen bg-gray-50 dark:bg-gray-950 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center animate-pulse">
+              <Wallet size={24} className="text-white" />
+            </div>
+            <span className="text-sm text-gray-400">جاري تحميل بياناتك...</span>
           </div>
-          <span className="text-sm text-gray-400">جاري تحميل بياناتك...</span>
         </div>
       </div>
     );
@@ -819,7 +857,7 @@ export default function BudgetApp() {
             </nav>
 
             <div className="p-4 border-t border-gray-100 dark:border-gray-800 space-y-1">
-              <button onClick={() => setDark(!dark)} className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+              <button onClick={toggleDark} className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
                 {dark ? <Sun size={18}/> : <Moon size={18}/>}
                 {dark ? "الوضع النهاري" : "الوضع الليلي"}
               </button>
@@ -1265,7 +1303,7 @@ export default function BudgetApp() {
                         <div className="grid grid-cols-4 gap-3 text-center">
                           <div><div className="text-xs text-gray-400">المبلغ الكلي</div><div className="font-bold text-gray-700 dark:text-white text-sm">{fmt(loan.total_amount)}</div></div>
                           <div><div className="text-xs text-gray-400">الدفعة الشهرية</div><div className="font-bold text-red-500 text-sm">{fmt(loan.monthly_payment)}</div></div>
-                          <div><div className="text-xs text-gray-400">دفعات مسددة</div><div className="font-bold text-blue-500 text-sm">{paidCount} / {loan.months_count||0}</div></div>
+                          <div><div className="text-xs text-gray-400">دفعات مسددة</div><div className="font-bold text-blue-500 text-sm">{fmtNum(paidCount)} / {fmtNum(loan.months_count||0)}</div></div>
                           <div><div className="text-xs text-gray-400">المتبقي</div><div className="font-bold text-orange-500 text-sm">{fmt(remaining)}</div></div>
                         </div>
 
@@ -1431,6 +1469,8 @@ export default function BudgetApp() {
                 setRecurringIncomes={setRecurringIncomes}
                 setModal={setModal}
                 showToast={showToast}
+                numberFormat={numberFormat}
+                onChangeNumberFormat={changeNumberFormat}
               />
             )}
           </main>
@@ -1494,7 +1534,7 @@ export default function BudgetApp() {
 }
 
 // ─── SETTINGS PAGE ────────────────────────────────────────────────────────────
-function SettingsPage({ userId, profile, balanceConfig, setBalanceConfig, priorSavings, setPriorSavings, recurringIncomes, setRecurringIncomes, setModal, showToast }) {
+function SettingsPage({ userId, profile, balanceConfig, setBalanceConfig, priorSavings, setPriorSavings, recurringIncomes, setRecurringIncomes, setModal, showToast, numberFormat, onChangeNumberFormat }) {
   const [localConfig, setLocalConfig] = useState(balanceConfig);
   const [dangerOpen, setDangerOpen] = useState(false);
   const [newPriorSaving, setNewPriorSaving] = useState({ name:"", place:"", amount:0, has_return:false, return_pct:0 });
@@ -1545,6 +1585,23 @@ function SettingsPage({ userId, profile, balanceConfig, setBalanceConfig, priorS
       <div className="bg-white dark:bg-gray-800 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-700 space-y-2">
         <h3 className="font-semibold text-gray-700 dark:text-white text-sm">معلومات الحساب</h3>
         <div className="text-sm text-gray-500 dark:text-gray-400">اسم المستخدم: <span className="font-medium text-gray-700 dark:text-white">{profile?.username || "—"}</span></div>
+      </div>
+
+      <div className="bg-white dark:bg-gray-800 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-700 space-y-3">
+        <h3 className="font-semibold text-gray-700 dark:text-white text-sm">صيغة الأرقام</h3>
+        <p className="text-xs text-gray-400">يُحفظ اختيارك ويُستخدم تلقائياً في كل مرة تسجّل فيها الدخول.</p>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={()=>onChangeNumberFormat("western")}
+            className={`py-2.5 rounded-xl text-sm font-medium transition-all ${numberFormat==="western" ? "bg-indigo-600 text-white" : "bg-gray-50 dark:bg-gray-700 text-gray-500 dark:text-gray-300"}`}>
+            123 (إنجليزية)
+          </button>
+          <button
+            onClick={()=>onChangeNumberFormat("arabic")}
+            className={`py-2.5 rounded-xl text-sm font-medium transition-all ${numberFormat==="arabic" ? "bg-indigo-600 text-white" : "bg-gray-50 dark:bg-gray-700 text-gray-500 dark:text-gray-300"}`}>
+            ١٢٣ (عربية)
+          </button>
+        </div>
       </div>
 
       <div className="bg-white dark:bg-gray-800 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-700">
