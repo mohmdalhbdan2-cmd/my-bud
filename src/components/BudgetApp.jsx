@@ -102,6 +102,32 @@ const debtCategoryLabel = (loan) =>
     ? loan.debt_category_custom
     : loan.debt_category || "أخرى";
 
+// تحويل بيانات الواجهة (estimated/actual/category) لأسماء الأعمدة الصحيحة في قاعدة البيانات
+// لأن جدول savings_entries يستخدم "planned" بدل "estimated"، وincome/fixed ما فيهم عمود category
+const toDbRow = (field, entry) => {
+  const row = {
+    name: entry.name ?? "",
+    actual: entry.actual ?? 0,
+  };
+  if (field === "savingsEntries") {
+    row.planned = entry.estimated ?? entry.planned ?? 0;
+  } else {
+    row.estimated = entry.estimated ?? 0;
+  }
+  if (field === "variableExpenses") {
+    row.category = entry.category || null;
+  }
+  return row;
+};
+
+// تحويل صف قادم من قاعدة البيانات لصيغة موحّدة تفهمها الواجهة (estimated بدل planned)
+const fromDbRow = (field, row) => {
+  if (field === "savingsEntries") {
+    return { ...row, estimated: row.planned ?? 0 };
+  }
+  return row;
+};
+
 // ─── SHARED UI COMPONENTS ────────────────────────────────────────────────────
 const StatCard = ({ label, value, sub, color, icon: Icon }) => (
   <div className="bg-white dark:bg-gray-800 rounded-2xl p-5 shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col gap-2">
@@ -557,7 +583,7 @@ export default function BudgetApp() {
             incomeEntries: income || [],
             fixedExpenses: fixed || [],
             variableExpenses: variable || [],
-            savingsEntries: savings || [],
+            savingsEntries: (savings || []).map(s => fromDbRow("savingsEntries", s)),
             savingsTarget: settings?.savings_target_pct ?? 0.20,
           }
         }));
@@ -649,9 +675,10 @@ export default function BudgetApp() {
     const apiMap = { incomeEntries: incomeApi, fixedExpenses: fixedExpenseApi, variableExpenses: variableExpenseApi, savingsEntries: savingsApi };
     const api = apiMap[field];
     try {
-      const row = await api.create({ user_id: userId, year: currentYear, month: currentMonth, name: "", estimated: 0, actual: 0 });
-      refreshMonth(currentYear, currentMonth, { [field]: [...(monthCache[monthKey]?.[field]||[]), row] });
-    } catch (err) { showToast("تعذّر الإضافة", "error"); }
+      const dbRow = toDbRow(field, { name: "", estimated: 0, actual: 0 });
+      const row = await api.create({ user_id: userId, year: currentYear, month: currentMonth, ...dbRow });
+      refreshMonth(currentYear, currentMonth, { [field]: [...(monthCache[monthKey]?.[field]||[]), fromDbRow(field, row)] });
+    } catch (err) { console.error(err); showToast("تعذّر الإضافة", "error"); }
   };
 
   const updateEntry = async (field, entry) => {
@@ -667,11 +694,12 @@ export default function BudgetApp() {
     const apiMap = { incomeEntries: incomeApi, fixedExpenses: fixedExpenseApi, variableExpenses: variableExpenseApi, savingsEntries: savingsApi };
     const api = apiMap[field];
     try {
-      await api.update(entry.id, { name: entry.name, estimated: entry.estimated, actual: entry.actual, category: entry.category });
+      const dbRow = toDbRow(field, entry);
+      await api.update(entry.id, dbRow);
       refreshMonth(currentYear, currentMonth, {
         [field]: (monthCache[monthKey]?.[field]||[]).map(e => e.id === entry.id ? entry : e)
       });
-    } catch (err) { showToast("تعذّر التحديث", "error"); }
+    } catch (err) { console.error(err); showToast("تعذّر التحديث", "error"); }
   };
 
   const deleteEntry = async (field, id) => {
@@ -1441,10 +1469,11 @@ export default function BudgetApp() {
           <QuickAdd onAdd={async (field,entry)=>{
             const apiMap = { incomeEntries: incomeApi, fixedExpenses: fixedExpenseApi, variableExpenses: variableExpenseApi, savingsEntries: savingsApi };
             try {
-              const row = await apiMap[field].create({ user_id: userId, year: currentYear, month: currentMonth, ...entry });
-              refreshMonth(currentYear, currentMonth, { [field]: [...(monthCache[monthKey]?.[field]||[]), row] });
+              const dbRow = toDbRow(field, entry);
+              const row = await apiMap[field].create({ user_id: userId, year: currentYear, month: currentMonth, ...dbRow });
+              refreshMonth(currentYear, currentMonth, { [field]: [...(monthCache[monthKey]?.[field]||[]), fromDbRow(field, row)] });
               setModal(null);
-            } catch(err){ showToast("تعذّر الإضافة", "error"); }
+            } catch(err){ console.error(err); showToast("تعذّر الإضافة", "error"); }
           }}/>
         </Modal>
         <Modal open={modal?.type==="addRecurringIncome"} onClose={()=>setModal(null)} title="إضافة دخل ثابت شهري">
