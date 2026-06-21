@@ -454,14 +454,15 @@ function GoalForm({ onSave }) {
 }
 
 function RecurringIncomeForm({ initial, onSave }) {
-  const [form, setForm] = useState(initial || { name:"الراتب الشهري", amount:0 });
+  const [form, setForm] = useState(initial || { name:"الراتب الشهري", amount:0, payment_day_of_month:"" });
   const f = (k,v) => setForm(p=>({...p,[k]:v}));
   return (
     <div className="space-y-4">
       <Field label="اسم الدخل الثابت" value={form.name} onChange={v=>f("name",v)} placeholder="مثال: الراتب" required/>
       <Field label="المبلغ الشهري" type="number" value={form.amount} onChange={v=>f("amount",v)} suffix="ر.س"/>
-      <p className="text-xs text-gray-400">سيظهر هذا المبلغ تلقائياً في كل شهر بدون الحاجة لإعادة إدخاله. تقدر تعدّل المبلغ أو تعلّمه "لم يُستلم" لأي شهر محدد دون ما يأثر على باقي الأشهر.</p>
-      <button onClick={()=>onSave(form)} className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-colors">حفظ</button>
+      <Field label="يوم النزول من كل شهر (اختياري)" type="number" value={form.payment_day_of_month} onChange={v=>f("payment_day_of_month",v)} placeholder="مثال: 27"/>
+      <p className="text-xs text-gray-400">لو حددت يوم النزول، المبلغ ما يُحتسب في حساباتك إلا بعد وصول ذلك اليوم فعلياً من كل شهر — قبله يظهر "لم يحن موعده بعد". اتركه فارغاً لو تبي المبلغ يُحتسب من أول الشهر مباشرة. تقدر أيضاً تعدّل المبلغ أو تعلّمه "لم يُستلم" لأي شهر محدد دون ما يأثر على باقي الأشهر.</p>
+      <button onClick={()=>onSave({...form, payment_day_of_month: form.payment_day_of_month ? parseInt(form.payment_day_of_month) : null})} className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-colors">حفظ</button>
     </div>
   );
 }
@@ -635,22 +636,36 @@ export default function BudgetApp() {
     const key = `${year}-${month}`;
     const base = monthCache[key] || { incomeEntries:[], fixedExpenses:[], variableExpenses:[], savingsEntries:[], savingsTarget:0.20 };
 
+    const today = new Date();
     const recurringAsEntries = recurringIncomes
       .map(r => {
         const overrideKey = `${r.id}-${year}-${month}`;
         const ov = recurringOverrides[overrideKey];
         const started = (year > r.start_year) || (year === r.start_year && month >= r.start_month);
         if (!started) return null;
+
+        // تحديد إذا كان يوم النزول قد حان فعلياً، بناءً على اليوم الحقيقي الحالي
+        let dayArrived = true; // لو ما حدد يوم نزول، يُحتسب مباشرة (السلوك القديم)
+        if (r.payment_day_of_month) {
+          const isPastMonth = (year < today.getFullYear()) || (year === today.getFullYear() && month < today.getMonth());
+          const isFutureMonth = (year > today.getFullYear()) || (year === today.getFullYear() && month > today.getMonth());
+          if (isPastMonth) dayArrived = true;
+          else if (isFutureMonth) dayArrived = false;
+          else dayArrived = today.getDate() >= r.payment_day_of_month;
+        }
+
         const actual = ov?.actual_amount ?? r.amount;
         const received = ov?.received ?? true;
         return {
           id: `recurring-${r.id}`,
           name: r.name,
           estimated: r.amount,
-          actual: received ? actual : 0,
+          actual: (received && dayArrived) ? actual : 0,
           isRecurring: true,
           recurringId: r.id,
           received,
+          dayArrived,
+          paymentDay: r.payment_day_of_month,
         };
       })
       .filter(Boolean);
@@ -1057,16 +1072,27 @@ export default function BudgetApp() {
                   </div>
                   <div className="px-5 pb-5 space-y-2">
                     {curMonthData.incomeEntries.filter(e=>e.isRecurring).map(e=>(
-                      <div key={e.id} className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-900/10 rounded-xl border border-green-100 dark:border-green-900">
-                        <Repeat size={14} className="text-green-500 shrink-0"/>
-                        <span className="text-sm font-medium text-gray-700 dark:text-white flex-1">{e.name}</span>
-                        <input type="number" value={e.actual} disabled={!e.received}
-                          onChange={ev=>updateEntry("incomeEntries", {...e, actual:parseFloat(ev.target.value)||0})}
-                          className="w-28 px-2 py-1 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 dark:text-white disabled:opacity-40 focus:outline-none"/>
-                        <button onClick={()=>updateEntry("incomeEntries", {...e, received: !e.received, actual: !e.received ? e.estimated : 0})}
-                          className={`text-xs px-2 py-1 rounded-lg font-medium ${e.received ? "bg-green-100 text-green-600" : "bg-red-100 text-red-500"}`}>
-                          {e.received ? "مُستلم" : "لم يُستلم"}
-                        </button>
+                      <div key={e.id} className={`flex items-center gap-2 p-3 rounded-xl border ${e.dayArrived ? "bg-green-50 dark:bg-green-900/10 border-green-100 dark:border-green-900" : "bg-amber-50 dark:bg-amber-900/10 border-amber-100 dark:border-amber-900"}`}>
+                        <Repeat size={14} className={e.dayArrived ? "text-green-500 shrink-0" : "text-amber-500 shrink-0"}/>
+                        <div className="flex-1">
+                          <span className="text-sm font-medium text-gray-700 dark:text-white">{e.name}</span>
+                          {e.paymentDay && (
+                            <div className="text-[11px] text-gray-400">يوم {fmtNum(e.paymentDay)} من كل شهر</div>
+                          )}
+                        </div>
+                        {!e.dayArrived ? (
+                          <span className="text-xs px-2 py-1 rounded-lg font-medium bg-amber-100 text-amber-600">لم يحن موعده بعد</span>
+                        ) : (
+                          <>
+                            <input type="number" value={e.actual} disabled={!e.received}
+                              onChange={ev=>updateEntry("incomeEntries", {...e, actual:parseFloat(ev.target.value)||0})}
+                              className="w-28 px-2 py-1 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 dark:text-white disabled:opacity-40 focus:outline-none"/>
+                            <button onClick={()=>updateEntry("incomeEntries", {...e, received: !e.received, actual: !e.received ? e.estimated : 0})}
+                              className={`text-xs px-2 py-1 rounded-lg font-medium ${e.received ? "bg-green-100 text-green-600" : "bg-red-100 text-red-500"}`}>
+                              {e.received ? "مُستلم" : "لم يُستلم"}
+                            </button>
+                          </>
+                        )}
                       </div>
                     ))}
                     {curMonthData.incomeEntries.filter(e=>!e.isRecurring).map(e=>(
@@ -1618,7 +1644,10 @@ function SettingsPage({ userId, profile, balanceConfig, setBalanceConfig, priorS
         <div className="space-y-2">
           {recurringIncomes.map(r => (
             <div key={r.id} className="flex items-center justify-between p-3 bg-green-50 dark:bg-green-900/10 rounded-xl">
-              <span className="text-sm font-medium text-gray-700 dark:text-white">{r.name}</span>
+              <div>
+                <span className="text-sm font-medium text-gray-700 dark:text-white">{r.name}</span>
+                {r.payment_day_of_month && <div className="text-[11px] text-gray-400">يوم {fmtNum(r.payment_day_of_month)} من كل شهر</div>}
+              </div>
               <div className="flex items-center gap-3">
                 <span className="font-bold text-green-600 text-sm">{fmt(r.amount)}</span>
                 <button onClick={async ()=>{ await recurringIncomeApi.remove(r.id); setRecurringIncomes(rs=>rs.filter(x=>x.id!==r.id)); }} className="p-1 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-400"><Trash2 size={14}/></button>
