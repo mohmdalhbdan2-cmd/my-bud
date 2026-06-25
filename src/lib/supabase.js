@@ -86,11 +86,16 @@ export const monthSettingsApi = {
     if (error) throw error;
     return data;
   },
-  upsert: async (userId, year, month, savingsTargetPct) => {
+  upsert: async (userId, year, month, savingsTargetPct, savingsTargetType, savingsTargetAmount) => {
+    const patch = {
+      user_id: userId, year, month,
+      savings_target_pct: savingsTargetPct ?? 0.2,
+    };
+    if (savingsTargetType !== undefined) patch.savings_target_type = savingsTargetType;
+    if (savingsTargetAmount !== undefined) patch.savings_target_amount = savingsTargetAmount;
     const { data, error } = await supabase
       .from('month_settings')
-      .upsert({ user_id: userId, year, month, savings_target_pct: savingsTargetPct },
-        { onConflict: 'user_id,year,month' })
+      .upsert(patch, { onConflict: 'user_id,year,month' })
       .select().single();
     if (error) throw error;
     return data;
@@ -105,25 +110,20 @@ export const loansApi = {
     return data;
   },
   create: async (loan) => {
-    // احسب monthly_payment و end_date قبل الإدراج
-    const monthsCount = loan.months_count || Math.ceil(loan.total_amount / loan.monthly_payment_input);
-    const monthlyPayment = loan.months_count
-      ? loan.total_amount / loan.months_count
-      : loan.monthly_payment_input;
-    const endDate = new Date(loan.start_date);
-    endDate.setMonth(endDate.getMonth() + monthsCount - 1);
-
-    const { data, error } = await supabase.from('loans').insert({
-      ...loan,
-      months_count: monthsCount,
-      monthly_payment: monthlyPayment,
-      end_date: endDate.toISOString().slice(0, 10),
-    }).select().single();
+    // القيم monthly_payment و months_count و end_date تأتي محسوبة من LoanForm
+    // نحذف فقط الحقول الخاصة بالـ frontend
+    const {
+      _customAmounts, monthly_payment_input, payment_type_mode,
+      deduct_on_create, add_on_create,
+      ...loanData
+    } = loan;
+    const { data, error } = await supabase.from('loans').insert(loanData).select().single();
     if (error) throw error;
     return data;
   },
   update: async (id, patch) => {
-    const { data, error } = await supabase.from('loans').update(patch).eq('id', id).select().single();
+    const { _customAmounts, monthly_payment_input, payment_type_mode, ...cleanPatch } = patch;
+    const { data, error } = await supabase.from('loans').update(cleanPatch).eq('id', id).select().single();
     if (error) throw error;
     return data;
   },
@@ -300,7 +300,7 @@ export const loanPaymentsApi = {
     if (error) throw error;
     return data;
   },
-  togglePaid: async (userId, loanId, year, month, isPaid) => {
+  togglePaid: async (userId, loanId, year, month, isPaid, paymentType = 'now', paidAmount = null) => {
     const { data, error } = await supabase
       .from('loan_payments')
       .upsert({
@@ -308,6 +308,8 @@ export const loanPaymentsApi = {
         loan_id: loanId,
         year, month,
         is_paid: isPaid,
+        payment_type: isPaid ? (paymentType || 'now') : null,
+        paid_amount: paidAmount,
         paid_at: isPaid ? new Date().toISOString() : null,
       }, { onConflict: 'loan_id,year,month' })
       .select().single();
@@ -409,5 +411,105 @@ export const dangerZoneApi = {
   deleteAllFinancialData: async (userId) => {
     const { error } = await supabase.rpc('delete_all_user_financial_data', { target_user_id: userId });
     if (error) throw error;
+  },
+};
+
+// ─── LOAN MONTH AMOUNTS - مبالغ مخصصة لكل شهر ─────────────────────────────
+export const loanMonthAmountsApi = {
+  listForLoan: async (loanId) => {
+    const { data, error } = await supabase.from('loan_month_amounts').select('*').eq('loan_id', loanId).order('month_index');
+    if (error) throw error;
+    return data;
+  },
+  upsert: async (userId, loanId, monthIndex, amount) => {
+    const { data, error } = await supabase
+      .from('loan_month_amounts')
+      .upsert({ user_id: userId, loan_id: loanId, month_index: monthIndex, amount },
+        { onConflict: 'loan_id,month_index' })
+      .select().single();
+    if (error) throw error;
+    return data;
+  },
+  bulkUpsert: async (userId, loanId, amounts) => {
+    // amounts: [{month_index, amount}]
+    const rows = amounts.map(a => ({ user_id: userId, loan_id: loanId, month_index: a.month_index, amount: a.amount }));
+    const { data, error } = await supabase
+      .from('loan_month_amounts')
+      .upsert(rows, { onConflict: 'loan_id,month_index' })
+      .select();
+    if (error) throw error;
+    return data;
+  },
+};
+
+// ─── RECURRING OBLIGATIONS - الالتزامات المتكررة ──────────────────────────────
+export const recurringObligationsApi = {
+  list: async (userId) => {
+    const { data, error } = await supabase
+      .from('recurring_obligations')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at');
+    if (error) throw error;
+    return data;
+  },
+  create: async (row) => {
+    const { data, error } = await supabase.from('recurring_obligations').insert(row).select().single();
+    if (error) throw error;
+    return data;
+  },
+  update: async (id, patch) => {
+    const { data, error } = await supabase.from('recurring_obligations').update(patch).eq('id', id).select().single();
+    if (error) throw error;
+    return data;
+  },
+  remove: async (id) => {
+    const { error } = await supabase.from('recurring_obligations').delete().eq('id', id);
+    if (error) throw error;
+  },
+};
+
+export const recurringObligationPaymentsApi = {
+  listForObligation: async (obligationId) => {
+    const { data, error } = await supabase.from('recurring_obligation_payments').select('*').eq('obligation_id', obligationId);
+    if (error) throw error;
+    return data;
+  },
+  togglePaid: async (userId, obligationId, year, month, isPaid, actualAmount) => {
+    const { data, error } = await supabase
+      .from('recurring_obligation_payments')
+      .upsert({
+        user_id: userId,
+        obligation_id: obligationId,
+        year, month,
+        is_paid: isPaid,
+        actual_amount: actualAmount,
+        paid_at: isPaid ? new Date().toISOString() : null,
+      }, { onConflict: 'obligation_id,year,month' })
+      .select().single();
+    if (error) throw error;
+    return data;
+  },
+};
+
+// ─── BALANCE TRANSACTIONS - حركات الرصيد ─────────────────────────────────────
+export const balanceTransactionsApi = {
+  list: async (userId, limit = 50) => {
+    const { data, error } = await supabase
+      .from('balance_transactions')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw error;
+    return data;
+  },
+  add: async (userId, { amount, reason, transaction_type, reference_id }) => {
+    const { data, error } = await supabase
+      .from('balance_transactions')
+      .insert({ user_id: userId, amount, reason, transaction_type, reference_id })
+      .select().single();
+    if (error) throw error;
+    return data;
   },
 };
